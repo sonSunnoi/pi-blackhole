@@ -73,6 +73,8 @@ async function fixture() {
   };
   registerPiVccCommand(
     {
+      events: { on: vi.fn(() => vi.fn()) },
+      on: vi.fn(),
       registerCommand: (_name: string, def: any) => {
         command = def;
       },

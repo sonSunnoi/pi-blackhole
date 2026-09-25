@@ -139,6 +139,9 @@ function hasUsableAuth(auth: { apiKey?: unknown; headers?: unknown }): boolean {
 }
 
 export class Runtime {
+  compactThresholdOverride?: (
+    model: import("@earendil-works/pi-coding-agent").ExtensionContext["model"],
+  ) => number | undefined;
   config: Config = { ...DEFAULTS };
   configLoaded = false;
   consolidationInFlight = false;

@@ -4,6 +4,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mkdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import { EventEmitter } from "node:events";
 
 const { testRoot } = vi.hoisted(() => {
   // Use require() to avoid import-hoisting issues with vi.mock
@@ -38,7 +39,20 @@ function createMockEnvironment() {
   const appendEntryCalls: Array<{ customType: string; data: unknown }> = [];
   const notifyCalls: Array<{ msg: string; level: string }> = [];
 
+  const eventsBus = Object.assign(new EventEmitter(), {} as unknown as Record<never, never>);
+  const eventsOn = vi.fn((name: string, handler: (data: any) => void) => {
+    eventsBus.addListener(name, handler);
+    const unsub = vi.fn(() => {
+      eventsBus.removeListener(name, handler);
+    });
+    unsub.mockClear(); // only strike post-registration calls, not the deferred init
+    return unsub;
+  });
+  eventsBus.on = eventsOn;
+
   const pi = {
+    events: eventsBus,
+    on: vi.fn(),
     registerCommand: vi.fn(
       (
         name: string,
@@ -131,6 +145,18 @@ describe("/blackhole command", () => {
     rmSync(testRoot, { recursive: true, force: true });
   });
 
+  it("resolves the TUI compaction action synchronously and preserves the marker", () => {
+    const { pi, runtime, makeHandlerArgs, compactCalls } = createMockEnvironment();
+    registerPiVccCommand(pi, runtime);
+    const resolve = vi.fn<(action: (ctx: ReturnType<typeof makeHandlerArgs>) => void) => void>();
+    pi.events.emit("blackhole:compact:v1", { resolve });
+    expect(resolve).toHaveBeenCalledOnce();
+    const action = resolve.mock.calls[0]?.[0];
+    if (!action) throw new Error("Missing compaction action");
+    action(makeHandlerArgs());
+    expect(compactCalls[0]?.customInstructions).toBe("__pi_vcc__");
+  });
+
   it("registers the blackhole command", () => {
     const { pi, runtime } = createMockEnvironment();
     registerPiVccCommand(pi as any, runtime as any);
@@ -168,6 +194,39 @@ describe("/blackhole command", () => {
     await handlerMap.get("blackhole")!("settings", makeHandlerArgs());
 
     expect(runtime.config.retainedToolOutputMaxTokens).toBe(9_000);
+  });
+
+  it("exposes direct compaction with pending flush and removes discovery on shutdown", () => {
+    const { pi, runtime, makeHandlerArgs, appendEntryCalls } = createMockEnvironment();
+    runtime.config.compaction = "manual";
+    const sendUserMessage = vi.fn();
+    (pi as any).sendUserMessage = sendUserMessage;
+    registerPiVccCommand(pi as any, runtime as any);
+    const [name, discover] = pi.events.on.mock.calls[0];
+    expect(name).toBe("blackhole:compact:v1");
+    let compact: any;
+    discover({
+      resolve: (action: any) => {
+        compact = action;
+      },
+    });
+    const pendingFile = join(testRoot, "agent", "pi-blackhole", "test-session-pending.json");
+    const observation = {
+      coversUpToId: "raw-1",
+      data: { observations: [{ id: "aaaaaaaaaaaa", content: "keep this" }] },
+    };
+    writeFileSync(pendingFile, JSON.stringify({ observation }));
+    const ctx = makeHandlerArgs();
+    compact(ctx);
+    expect(appendEntryCalls).toHaveLength(1);
+    expect(existsSync(pendingFile)).toBe(false);
+    expect(ctx.compact.mock.calls[0][0].customInstructions).toBe("__pi_vcc__");
+    ctx.compact.mock.calls[0][0].onComplete();
+    expect(sendUserMessage).not.toHaveBeenCalled();
+    expect(pi.registerCommand.mock.calls).toHaveLength(1);
+    const shutdown = pi.on.mock.calls.find(([name]: any[]) => name === "session_shutdown")![1];
+    shutdown();
+    expect(pi.events.on.mock.results[0].value).toHaveBeenCalledOnce();
   });
 
   it("calls ctx.compact with PI_VCC_COMPACT_INSTRUCTION", async () => {
@@ -262,44 +321,26 @@ describe("/blackhole command", () => {
     expect(notifyCalls[0].msg).toContain("Observational memory enabled");
   });
 
-  it("flush pending entries when noAutoCompact is active and pending data exists", async () => {
-    const { pi, runtime, handlerMap, makeHandlerArgs, notifyCalls } = createMockEnvironment();
-    runtime.config.compaction = "manual";
-    registerPiVccCommand(pi as any, runtime as any);
+  it.each(["command", "event"])(
+    "flush pending entries through %s in manual mode",
+    async (route) => {
+      const { pi, runtime, handlerMap, makeHandlerArgs, notifyCalls } = createMockEnvironment();
+      runtime.config.compaction = "manual";
+      registerPiVccCommand(pi as any, runtime as any);
 
-    // Write a pending state file — name pattern is <sessionId>-pending.json
-    const pendingDir = join(testRoot, "agent", "pi-blackhole");
-    const pendingFile = join(pendingDir, "test-session-pending.json");
-    writeFileSync(
-      pendingFile,
-      JSON.stringify({
-        // isPendingOMState checks for .observation/.reflection with coversUpToId
-        observation: {
-          coversUpToId: "raw-1",
-          data: { observations: [{ id: "aaaaaaaaaaaa", content: "test obs" }] },
-        },
-        reflection: {
-          coversUpToId: "raw-1",
-          data: {
-            reflections: [
-              {
-                id: "eeeeeeeeeeee",
-                content: "test ref",
-                supportingObservationIds: ["aaaaaaaaaaaa"],
-              },
-            ],
+      // Write a pending state file — name pattern is <sessionId>-pending.json
+      const pendingDir = join(testRoot, "agent", "pi-blackhole");
+      const pendingFile = join(pendingDir, "test-session-pending.json");
+      writeFileSync(
+        pendingFile,
+        JSON.stringify({
+          // isPendingOMState checks for .observation/.reflection with coversUpToId
+          observation: {
+            coversUpToId: "raw-1",
+            data: { observations: [{ id: "aaaaaaaaaaaa", content: "test obs" }] },
           },
-        },
-        observationBatches: [
-          {
-            data: {
-              observations: [{ id: "aaaaaaaaaaaa", content: "test obs" }],
-              coversUpToId: "raw-1",
-            },
-          },
-        ],
-        reflectionBatches: [
-          {
+          reflection: {
+            coversUpToId: "raw-1",
             data: {
               reflections: [
                 {
@@ -308,21 +349,51 @@ describe("/blackhole command", () => {
                   supportingObservationIds: ["aaaaaaaaaaaa"],
                 },
               ],
-              coversUpToId: "raw-1",
             },
           },
-        ],
-      }),
-    );
+          observationBatches: [
+            {
+              data: {
+                observations: [{ id: "aaaaaaaaaaaa", content: "test obs" }],
+                coversUpToId: "raw-1",
+              },
+            },
+          ],
+          reflectionBatches: [
+            {
+              data: {
+                reflections: [
+                  {
+                    id: "eeeeeeeeeeee",
+                    content: "test ref",
+                    supportingObservationIds: ["aaaaaaaaaaaa"],
+                  },
+                ],
+                coversUpToId: "raw-1",
+              },
+            },
+          ],
+        }),
+      );
 
-    const ctx = makeHandlerArgs();
-    await handlerMap.get("blackhole")!("", ctx);
+      const ctx = makeHandlerArgs();
+      if (route === "command") {
+        await handlerMap.get("blackhole")!("", ctx);
+      } else {
+        const resolve =
+          vi.fn<(action: (context: ReturnType<typeof makeHandlerArgs>) => void) => void>();
+        pi.events.emit("blackhole:compact:v1", { resolve });
+        const action = resolve.mock.calls[0]?.[0];
+        if (!action) throw new Error("Missing compaction action");
+        action(ctx);
+      }
 
-    expect(notifyCalls[0].msg).toContain("pending entries flushed");
-    expect(existsSync(pendingFile)).toBe(false); // cleared after flush
-    // Should call compact after flush
-    expect(ctx.compact).toHaveBeenCalledTimes(1);
-  });
+      expect(notifyCalls[0].msg).toContain("pending entries flushed");
+      expect(existsSync(pendingFile)).toBe(false); // cleared after flush
+      // Should call compact after flush
+      expect(ctx.compact).toHaveBeenCalledTimes(1);
+    },
+  );
 });
 
 // ── Feature 1: Follow-up prompt after compaction ────────────────────────────

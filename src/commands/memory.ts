@@ -1,3 +1,4 @@
+import { resolveCompactThreshold } from "../om/threshold-override.js";
 /**
  * /blackhole-memory command — shows memory pipeline status and content.
  *
@@ -8,7 +9,6 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { copyTextToClipboard } from "../om/clipboard.js";
 import {
   BUILTIN_PRESETS,
-  autoCompactThreshold,
   effectivePresets,
   presetRatioForWindow,
   sessionContextWindow,
@@ -226,7 +226,7 @@ export function registerMemoryCommand(pi: ExtensionAPI, runtime: Runtime): void 
         `Compaction:     ~${compactionProgress.toLocaleString()} tokens` +
           (isManualMode(runtime.config)
             ? " [manual]"
-            : ` (triggers at ${autoCompactThreshold(runtime.config, ctx.model).toLocaleString()}${compactThresholdSuffix(runtime.config, sessionContextWindow(ctx.model, runtime.config))})`),
+            : ` (triggers at ${resolveCompactThreshold(runtime, ctx.model).toLocaleString()}${runtime.compactThresholdOverride?.(ctx.model) !== undefined ? " (widget override)" : compactThresholdSuffix(runtime.config, sessionContextWindow(ctx.model, runtime.config))})`),
         `Obs pool:       ~${poolTokens.toLocaleString()} / ${runtime.config.observationsPoolMaxTokens.toLocaleString()} tokens (${pct(poolTokens, runtime.config.observationsPoolMaxTokens)}%)${poolScopeSuffix}`,
         `Reflect pool:   ~${visibleReflectionTokens.toLocaleString()} tokens`,
       ];

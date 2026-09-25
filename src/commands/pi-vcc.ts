@@ -6,7 +6,7 @@
  * - Flushes pending OM state (observations/reflections/dropped) when manual mode is active
  *   before triggering compaction, so the compaction summary includes all accumulated memory.
  */
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Runtime } from "../om/runtime.js";
 import {
   PI_VCC_COMPACT_INSTRUCTION,
@@ -20,7 +20,89 @@ import {
   OM_REFLECTIONS_RECORDED,
 } from "../om/ledger/index.js";
 
+/** Shared manual action: command and UI callers bypass prompt submission. */
+export function compactWithBlackhole(
+  pi: ExtensionAPI,
+  runtime: Runtime,
+  ctx: ExtensionContext,
+  followUpPrompt: string | null = null,
+): void {
+  const sessionId = ctx.sessionManager.getSessionId();
+  // If compaction is manual (or legacy noAutoCompact): flush pending OM entries
+  // into the branch before compacting so the summary includes accumulated memory.
+  if (runtime.config.compaction === "manual" && hasPendingData(sessionId)) {
+    const pending = readPendingState(sessionId);
+    // Write all accumulated observation batches (or latest single batch
+    // as fallback for legacy pending.json without batch arrays).
+    const obsBatches = pending.observationBatches?.length
+      ? pending.observationBatches
+      : pending.observation
+        ? [pending.observation]
+        : [];
+    for (const batch of obsBatches) {
+      pi.appendEntry(OM_OBSERVATIONS_RECORDED, batch.data);
+    }
+    // Write all accumulated reflection batches (or latest single batch
+    // as fallback for legacy pending.json without batch arrays).
+    const reflBatches = pending.reflectionBatches?.length
+      ? pending.reflectionBatches
+      : pending.reflection
+        ? [pending.reflection]
+        : [];
+    for (const batch of reflBatches) {
+      pi.appendEntry(OM_REFLECTIONS_RECORDED, batch.data);
+    }
+    // Write all accumulated dropper batches (or latest single batch
+    // as fallback for legacy pending.json without batch arrays).
+    const dropBatches = pending.droppedBatches?.length
+      ? pending.droppedBatches
+      : pending.dropped
+        ? [pending.dropped]
+        : [];
+    for (const batch of dropBatches) {
+      pi.appendEntry(OM_OBSERVATIONS_DROPPED, batch.data);
+    }
+    clearPendingState(sessionId);
+    ctx.ui.notify("Observational memory: pending entries flushed", "info");
+  }
+
+  ctx.compact({
+    customInstructions: PI_VCC_COMPACT_INSTRUCTION,
+    onComplete: () => {
+      const stats = runtime.compactionStats;
+      if (stats) {
+        ctx.ui.notify(formatCompactionStats(stats), "info");
+      } else {
+        ctx.ui.notify("Compacted with blackhole", "info");
+      }
+      notifyMigrationReminder(sessionId, (msg, level) => ctx.ui.notify(msg, level as any));
+
+      // Fire follow-up prompt after compaction completes
+      if (followUpPrompt) {
+        try {
+          void Promise.resolve(pi.sendUserMessage(followUpPrompt)).catch(() => {});
+        } catch {}
+      }
+    },
+    onError: (err) => {
+      if (err.message === "Compaction cancelled" || err.message === "Already compacted") {
+        ctx.ui.notify("Nothing to compact", "warning");
+      } else {
+        ctx.ui.notify(`Compaction failed: ${err.message}`, "error");
+      }
+    },
+  });
+}
+
 export const registerPiVccCommand = (pi: ExtensionAPI, runtime: Runtime) => {
+  const removeCompact = pi.events.on("blackhole:compact:v1", (data) => {
+    const request = data as {
+      resolve: (compact: (ctx: ExtensionContext) => void) => void;
+    };
+    request.resolve((ctx) => compactWithBlackhole(pi, runtime, ctx));
+  });
+  pi.on("session_shutdown", () => removeCompact());
+
   const prefixMatch = (value: string, prefix: string): boolean => {
     return value.toLowerCase().startsWith(prefix.toLowerCase());
   };
@@ -56,8 +138,6 @@ export const registerPiVccCommand = (pi: ExtensionAPI, runtime: Runtime) => {
       );
     },
     handler: async (args, ctx) => {
-      const sessionId = ctx.sessionManager.getSessionId();
-
       // Handle subcommands
       const trimmed = (typeof args === "string" ? args : "").trim();
       if (trimmed === "configure" || trimmed === "settings") {
@@ -140,70 +220,7 @@ export const registerPiVccCommand = (pi: ExtensionAPI, runtime: Runtime) => {
       // that isn't a known subcommand is treated as follow-up text.
       const followUpPrompt = trimmed ? trimmed : null;
 
-      // If compaction is manual (or legacy noAutoCompact): flush pending OM entries
-      // into the branch before compacting so the summary includes accumulated memory.
-      if (runtime.config.compaction === "manual" && hasPendingData(sessionId)) {
-        const pending = readPendingState(sessionId);
-        // Write all accumulated observation batches (or latest single batch
-        // as fallback for legacy pending.json without batch arrays).
-        const obsBatches = pending.observationBatches?.length
-          ? pending.observationBatches
-          : pending.observation
-            ? [pending.observation]
-            : [];
-        for (const batch of obsBatches) {
-          pi.appendEntry(OM_OBSERVATIONS_RECORDED, batch.data);
-        }
-        // Write all accumulated reflection batches (or latest single batch
-        // as fallback for legacy pending.json without batch arrays).
-        const reflBatches = pending.reflectionBatches?.length
-          ? pending.reflectionBatches
-          : pending.reflection
-            ? [pending.reflection]
-            : [];
-        for (const batch of reflBatches) {
-          pi.appendEntry(OM_REFLECTIONS_RECORDED, batch.data);
-        }
-        // Write all accumulated dropper batches (or latest single batch
-        // as fallback for legacy pending.json without batch arrays).
-        const dropBatches = pending.droppedBatches?.length
-          ? pending.droppedBatches
-          : pending.dropped
-            ? [pending.dropped]
-            : [];
-        for (const batch of dropBatches) {
-          pi.appendEntry(OM_OBSERVATIONS_DROPPED, batch.data);
-        }
-        clearPendingState(sessionId);
-        ctx.ui.notify("Observational memory: pending entries flushed", "info");
-      }
-
-      ctx.compact({
-        customInstructions: PI_VCC_COMPACT_INSTRUCTION,
-        onComplete: () => {
-          const stats = runtime.compactionStats;
-          if (stats) {
-            ctx.ui.notify(formatCompactionStats(stats), "info");
-          } else {
-            ctx.ui.notify("Compacted with blackhole", "info");
-          }
-          notifyMigrationReminder(sessionId, (msg, level) => ctx.ui.notify(msg, level as any));
-
-          // Fire follow-up prompt after compaction completes
-          if (followUpPrompt) {
-            try {
-              void Promise.resolve(pi.sendUserMessage(followUpPrompt)).catch(() => {});
-            } catch {}
-          }
-        },
-        onError: (err) => {
-          if (err.message === "Compaction cancelled" || err.message === "Already compacted") {
-            ctx.ui.notify("Nothing to compact", "warning");
-          } else {
-            ctx.ui.notify(`Compaction failed: ${err.message}`, "error");
-          }
-        },
-      });
+      compactWithBlackhole(pi, runtime, ctx, followUpPrompt);
     },
   });
 };

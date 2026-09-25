@@ -1,3 +1,4 @@
+import { registerThresholdOverride } from "./src/om/threshold-override.js";
 /**
  * Unified entry point. Registers all pi-vcc + observational-memory
  * commands, hooks, and tools.
@@ -73,6 +74,7 @@ export default async (pi: ExtensionAPI) => {
   // Carry the startup probe result into the runtime so triggers can explain an
   // unsupported host instead of silently falling back every run.
   omRuntime.inlineCompactionAdapterStatus = inlineCompactionAdapterStatus;
+  registerThresholdOverride(pi, omRuntime);
 
   // Observational memory: background consolidation pipeline
   registerConsolidationTrigger(pi, omRuntime); // agent_start + turn_end → observer/reflector/dropper

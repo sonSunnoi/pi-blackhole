@@ -80,6 +80,7 @@ function captureHandler(
     sendMessage: vi.fn(),
   };
   const runtime = {
+    compactThresholdOverride: undefined as (() => number) | undefined,
     ensureConfig: vi.fn(),
     resetInfoGate: vi.fn(),
     // Passthrough: call ui.notify so tests can observe notification content
@@ -188,6 +189,27 @@ describe("V3 compaction trigger (blackhole)", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it("settled trigger honors runtime override above configured threshold", async () => {
+    const { handler, runtime } = captureHandler({ compactAfterTokens: 3 });
+    runtime.compactThresholdOverride = () => 1000;
+    const ctx = fakeCtx([dueBranch]);
+    handler({ messages: [] }, ctx);
+    await flushAll();
+    expect(ctx.compact).not.toHaveBeenCalled();
+  });
+
+  it("mid-run trigger honors runtime override above configured threshold", async () => {
+    const { turnHandler, runtime } = captureHandler({
+      compactAfterTokens: 3,
+      midRunCompaction: "pause",
+    });
+    runtime.compactThresholdOverride = () => 1000;
+    const ctx = fakeCtx([dueBranch]);
+    await turnHandler({}, ctx);
+    await flushAll();
+    expect(ctx.compact).not.toHaveBeenCalled();
   });
 
   it("does nothing below compactAfterTokens", async () => {

@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { rawTokensSinceLastCompaction, type Entry } from "./ledger/index.js";
-import { autoCompactThreshold } from "./model-budget.js";
+import { resolveCompactThreshold } from "./threshold-override.js";
 import type { Runtime } from "./runtime.js";
 import { debugLog } from "./debug-log.js";
 import { RETRYABLE_ERROR_RE } from "./retryable-error.js";
@@ -236,7 +236,7 @@ async function handleTurnEnd(
   // compactAfterRatio / compactReserveTokens are configured; fixed token
   // count otherwise (issue #60). Evaluated per event, so a mid-session
   // /model switch is picked up on the next check.
-  const threshold = autoCompactThreshold(runtime.config, ctx.model);
+  const threshold = resolveCompactThreshold(runtime, ctx.model);
   const entries = ctx.sessionManager.getBranch() as Entry[];
   const tokens = rawTokensSinceLastCompaction(entries);
   if (tokens < threshold) {
@@ -396,7 +396,7 @@ function handleAgentEnd(event: any, ctx: any, runtime: Runtime): void {
 
   // Effective auto-compaction threshold for this evaluation (issue #60) — see
   // handleTurnEnd for the derivation rationale. Logged as the resolved number.
-  const threshold = autoCompactThreshold(runtime.config, ctx.model);
+  const threshold = resolveCompactThreshold(runtime, ctx.model);
 
   dbg("compaction_trigger.agent_end", {
     passive: runtime.config.passive,
